@@ -15,7 +15,10 @@ import shutil
 #  CONFIGURATION
 # ─────────────────────────────────────────────
 
-W, H       = 848, 480
+# Scaled down to 640x360 to respect USB 3.0 bandwidth limits across dual cameras
+COLOR_W, COLOR_H = 640, 360
+DEPTH_W, DEPTH_H = 640, 360
+
 TARGET_FPS = 60
 
 # Leave as empty list to auto-detect all connected RealSense devices.
@@ -142,9 +145,9 @@ def camera_worker(serial, cam_label, ready_event, global_stop):
     config   = rs.config()
     config.enable_device(serial)
     
-    # Using rs.format.mjpeg to offload compression to RealSense ASIC and slash USB bandwidth
-    config.enable_stream(rs.stream.color, W, H, rs.format.mjpeg, TARGET_FPS)
-    config.enable_stream(rs.stream.depth, W, H, rs.format.z16,   TARGET_FPS)
+    # Native bgr8 format with lower resolution to prevent USB bandwidth saturation
+    config.enable_stream(rs.stream.color, COLOR_W, COLOR_H, rs.format.bgr8, TARGET_FPS)
+    config.enable_stream(rs.stream.depth, DEPTH_W, DEPTH_H, rs.format.z16,  TARGET_FPS)
 
     profile = pipeline.start(config)
     align   = rs.align(rs.stream.color)
@@ -178,7 +181,7 @@ def camera_worker(serial, cam_label, ready_event, global_stop):
 
     # ── Video writer & Threads ───────────────────────────────────────────────
     fourcc       = cv2.VideoWriter_fourcc(*'mp4v')
-    color_writer = cv2.VideoWriter(video_path, fourcc, TARGET_FPS, (W, H))
+    color_writer = cv2.VideoWriter(video_path, fourcc, TARGET_FPS, (COLOR_W, COLOR_H))
 
     color_queue = queue.Queue(maxsize=300)   
     depth_queue = queue.Queue(maxsize=300)
@@ -341,7 +344,7 @@ def main():
         p   = rs.pipeline()
         cfg = rs.config()
         cfg.enable_device(serial)
-        cfg.enable_stream(rs.stream.color, W, H, rs.format.mjpeg, TARGET_FPS)
+        cfg.enable_stream(rs.stream.color, COLOR_W, COLOR_H, rs.format.bgr8, TARGET_FPS)
         p.start(cfg)
         preview_pipelines.append((label, p))
 
