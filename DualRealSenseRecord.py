@@ -141,8 +141,10 @@ def camera_worker(serial, cam_label, ready_event, global_stop):
     pipeline = rs.pipeline()
     config   = rs.config()
     config.enable_device(serial)
-    config.enable_stream(rs.stream.color, W, H, rs.format.bgr8, TARGET_FPS)
-    config.enable_stream(rs.stream.depth, W, H, rs.format.z16,  TARGET_FPS)
+    
+    # Using rs.format.mjpeg to offload compression to RealSense ASIC and slash USB bandwidth
+    config.enable_stream(rs.stream.color, W, H, rs.format.mjpeg, TARGET_FPS)
+    config.enable_stream(rs.stream.depth, W, H, rs.format.z16,   TARGET_FPS)
 
     profile = pipeline.start(config)
     align   = rs.align(rs.stream.color)
@@ -339,7 +341,7 @@ def main():
         p   = rs.pipeline()
         cfg = rs.config()
         cfg.enable_device(serial)
-        cfg.enable_stream(rs.stream.color, W, H, rs.format.bgr8, TARGET_FPS)
+        cfg.enable_stream(rs.stream.color, W, H, rs.format.mjpeg, TARGET_FPS)
         p.start(cfg)
         preview_pipelines.append((label, p))
 
