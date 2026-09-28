@@ -39,46 +39,6 @@ def make_camera_output_dir(cam_label):
 
 
 # ─────────────────────────────────────────────
-#  ARCHIVE HELPER
-# ─────────────────────────────────────────────
-
-def archive_depth_frames(output_folder, cam_label):
-    """
-    Bundles all loose depth .npy files into an uncompressed .tar archive
-    to prevent inode saturation and speed up HPC rsync/scp transfers.
-    
-    Arguments:
-        output_folder (str): Directory for the specific camera (e.g., 'realsense_cam_0').
-        cam_label (str): Camera label used for logging output.
-    
-    Returns:
-        tar_path (str): Full path to the created depth_frames.tar file.
-    """
-    depth_dir = os.path.join(output_folder, 'depth_frames')
-    tar_path = os.path.join(output_folder, 'depth_frames.tar')
-
-    if not os.path.exists(depth_dir):
-        return tar_path
-
-    print(f"  [{cam_label}] Packaging depth frames into {tar_path} (uncompressed tar for HPC compatibility)...")
-    start_archive = time.time()
-    file_count = 0
-
-    with tarfile.open(tar_path, "w") as tar:
-        for fname in sorted(os.listdir(depth_dir)):
-            if fname.endswith('.npy'):
-                full_path = os.path.join(depth_dir, fname)
-                tar.add(full_path, arcname=fname)
-                file_count += 1
-
-    # Remove loose folder after tar completion to release inodes
-    shutil.rmtree(depth_dir)
-    elapsed = time.time() - start_archive
-    print(f"  [{cam_label}] Packaged {file_count} depth frames in {elapsed:.1f}s. Loose directory removed.")
-    return tar_path
-
-
-# ─────────────────────────────────────────────
 #  WRITER THREADS
 # ─────────────────────────────────────────────
 
@@ -290,10 +250,10 @@ def camera_worker(serial, cam_label, ready_event, global_stop):
 
         print(f"\n  [{cam_label}] Finished recording — {frame_count} frames @ {actual_fps:.2f} fps actual")
         print(f"    Color video  : {video_path}")
+        print(f"    Depth frames : {depth_dir}/")
         print(f"    Timestamps   : {csv_path}")
 
         # Package loose depth .npy files into an uncompressed tar archive
-        archive_depth_frames(out_dir, cam_label)
 
 
 # ─────────────────────────────────────────────
