@@ -178,13 +178,13 @@ if __name__ == "__main__":
     aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
     board = cv2.aruco.CharucoBoard((5, 8), 0.10795, 0.08128, aruco_dict)
     extract_gopro_intrinsic_frames(
-        video_path="test.mp4",
+        video_path="GX012227.mp4",
         output_dir="gopro_0_intrinsic_frames",
         board=board,
         dictionary=aruco_dict,
         stride=1,
-        min_corners=1,
-        blur_threshold=8,
-        max_frames=100
+        min_corners=12,
+        blur_threshold=12,
+        max_frames=300
     )
     
