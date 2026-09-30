@@ -4,24 +4,24 @@ import numpy as np
 import open3d as o3d
 import pyrealsense2 as rs
 
-# --- CONFIGURATION ---
-LEFT_IMAGES_PATH = "calib_capture/left_cam/*.jpg"
-RIGHT_IMAGES_PATH = "calib_capture/right_cam/*.jpg"
+# --- CONFIGURATION (Synced with your ChArUco dimensions) ---
+LEFT_IMAGES_PATH = "left_cam/*.png"
+RIGHT_IMAGES_PATH = "right_cam/*.png"
 
-# Setup ChArUco Board Parameters (4x4 dictionary, e.g., 5x7 squares layout)
-# Adjust squaresX and squaresY to match your physical board dimensions
+# ChArUco board layout matching your reference code
 ARUCO_DICT = cv2.aruco.DICT_4X4_50
 squaresX = 5
 squaresY = 7
-squareLength = 0.04  # Size of checker square in meters (e.g., 40mm)
-markerLength = 0.03  # Size of ArUco marker in meters (e.g., 30mm)
+squareLength = 0.10795  # 0.10795 meters
+markerLength = 0.08128  # 0.08128 meters
 
-# Initialize ArUco dictionary and ChArUco board
+# Initialize ArUco dictionary, board, and detector
 aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICT)
 board = cv2.aruco.CharucoBoard(
     (squaresX, squaresY), squareLength, markerLength, aruco_dict
 )
-detector = cv2.aruco.CharucoDetector(board)
+detector_params = cv2.aruco.DetectorParameters()
+detector = cv2.aruco.ArucoDetector(aruco_dict, detector_params)
 
 # 1. Pull Intrinsics directly from RealSense Pipeline (Offline device read)
 print("Pulling factory intrinsics from RealSense device...")
@@ -67,22 +67,36 @@ for img_l_path, img_r_path in zip(left_images, right_images):
   gray_l = cv2.cvtColor(img_l, cv2.COLOR_BGR2GRAY)
   gray_r = cv2.cvtColor(img_r, cv2.COLOR_BGR2GRAY)
 
-  # Detect ChArUco corners for both images
-  charuco_corners_l, charuco_ids_l, _, _ = detector.detectBoard(gray_l)
-  charuco_corners_r, charuco_ids_r, _, _ = detector.detectBoard(gray_r)
+  # Detect ArUco markers and interpolate ChArUco corners
+  marker_corners_l, marker_ids_l, _ = detector.detectMarkers(gray_l)
+  marker_corners_r, marker_ids_r, _ = detector.detectMarkers(gray_r)
+
+  charuco_corners_l, charuco_ids_l = None, None
+  charuco_corners_r, charuco_ids_r = None, None
+
+  if marker_ids_l is not None and len(marker_ids_l) > 0:
+    _, charuco_corners_l, charuco_ids_l = cv2.aruco.interpolateCornersCharuco(
+        marker_corners_l, marker_ids_l, gray_l, board
+    )
+
+  if marker_ids_r is not None and len(marker_ids_r) > 0:
+    _, charuco_corners_r, charuco_ids_r = cv2.aruco.interpolateCornersCharuco(
+        marker_corners_r, marker_ids_r, gray_r, board
+    )
 
   # Check if both cameras successfully detected enough corners
   if (
-      charuco_corners_l is not None
-      and charuco_corners_r is not None
-      and len(charuco_corners_l) > 4
-      and len(charuco_corners_r) > 4
+      charuco_ids_l is not None
+      and charuco_ids_r is not None
+      and len(charuco_ids_l) > 4
+      and len(charuco_ids_r) > 4
   ):
 
-    # Match common corners found in both views
-    # For robust stereo calibration, we match based on IDs
+    # Match common corners found in both views based on IDs
+    charuco_ids_l_flat = charuco_ids_l.flatten()
+    charuco_ids_r_flat = charuco_ids_r.flatten()
     common_ids, idx_l, idx_r = np.intersect1d(
-        charuco_ids_l, charuco_ids_r, return_indices=True
+        charuco_ids_l_flat, charuco_ids_r_flat, return_indices=True
     )
 
     if len(common_ids) > 4:
@@ -101,7 +115,7 @@ for img_l_path, img_r_path in zip(left_images, right_images):
 if len(objpoints) == 0:
   raise ValueError(
       "No valid ChArUco corners found in any image pair! Check your board"
-      " dimensions (squaresX/squaresY)."
+      " dimensions."
   )
 
 print("Running Stereo Calibration between the two RealSense cameras...")
