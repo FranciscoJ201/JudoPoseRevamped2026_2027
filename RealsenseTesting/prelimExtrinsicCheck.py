@@ -24,11 +24,14 @@ color_profile = profile.get_stream(rs.stream.color).as_video_stream_profile()
 intrinsics = color_profile.get_intrinsics()
 
 # Construct OpenCV intrinsic matrix K
-K = np.array([
-    [intrinsics.fx, 0, intrinsics.ppx],
-    [0, intrinsics.fy, intrinsics.ppy],
-    [0, 0, 1],
-], dtype=np.float32)
+K = np.array(
+    [
+        [intrinsics.fx, 0, intrinsics.ppx],
+        [0, intrinsics.fy, intrinsics.ppy],
+        [0, 0, 1],
+    ],
+    dtype=np.float32,
+)
 
 dist_coeffs = np.array(
     intrinsics.coeffs, dtype=np.float32
@@ -37,12 +40,10 @@ pipeline.stop()
 print("Successfully retrieved camera intrinsics!")
 
 # 2. Prepare Object Points (3D coordinates of board grid)
-objp = np.zeros(
-    (CHECKBOARD_SIZE[0] * CHECKBOARD_SIZE[1], 3), np.float32
-)
-objp[:, :2] = np.mgrid[0 : CHECKBOARD_SIZE[0], 0 : CHECKBOARD_SIZE[1]].T.reshape(
-    -1, 2
-)
+objp = np.zeros((CHECKBOARD_SIZE[0] * CHECKBOARD_SIZE[1], 3), np.float32)
+objp[:, :2] = np.mgrid[
+    0 : CHECKBOARD_SIZE[0], 0 : CHECKBOARD_SIZE[1]
+].T.reshape(-1, 2)
 objp *= SQUARE_SIZE
 
 objpoints = []  # 3D points in real world space
@@ -57,6 +58,9 @@ print(
     " images."
 )
 
+image_shape = None
+criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+
 for img_l_path, img_r_path in zip(left_images, right_images):
   img_l = cv2.imread(img_l_path)
   img_r = cv2.imread(img_r_path)
@@ -69,16 +73,20 @@ for img_l_path, img_r_path in zip(left_images, right_images):
   if ret_l and ret_r:
     objpoints.append(objp)
     # Refine corner locations for sub-pixel accuracy
-    criteria = (
-        cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
-        30,
-        0.001,
-    )
     cv2.cornerSubPix(gray_l, corners_l, (11, 11), (-1, -1), criteria)
     cv2.cornerSubPix(gray_r, corners_r, (11, 11), (-1, -1), criteria)
 
     imgpoints_left.append(corners_l)
     imgpoints_right.append(corners_r)
+
+    # Save image shape safely inside the loop
+    image_shape = gray_l.shape[::-1]
+
+if len(objpoints) == 0:
+  raise ValueError(
+      "No valid chessboard corners found in any image pair! Check your image"
+      " paths and board size."
+  )
 
 print("Running Stereo Calibration between the two RealSense cameras...")
 # 3. Stereo Calibration to find Relative Extrinsics (R, T) between Cam 1 and Cam 2
@@ -91,7 +99,7 @@ ret, _, _, _, _, R, T, _, _ = cv2.stereoCalibrate(
     dist_coeffs,
     K,
     dist_coeffs,
-    gray_l.shape[::-1],
+    image_shape,
     criteria=criteria,
     flags=flags,
 )
@@ -111,9 +119,7 @@ pt1 = imgpoints_left[0][0][0]
 pt2 = imgpoints_right[0][0][0]
 
 # Triangulate 3D point using OpenCV
-pt4d = cv2.triangulatePoints(
-    P1, P2, pt1.reshape(2, 1), pt2.reshape(2, 1)
-)
+pt4d = cv2.triangulatePoints(P1, P2, pt1.reshape(2, 1), pt2.reshape(2, 1))
 point_3d = (pt4d[:3] / pt4d[3]).ravel()
 print(f"Test Triangulated 3D Point (Board Corner): {point_3d} meters")
 
