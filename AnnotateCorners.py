@@ -1,33 +1,30 @@
-import argparse
 import json
 import os
 import cv2
 import numpy as np
 
+# ─────────────────────────────────────────────
+#  FIELD LAPTOP CONFIGURATION
+# ─────────────────────────────────────────────
 
-def parse_arguments():
-    """
-    Parses CLI arguments for interactive mat corner annotation.
-    """
-    parser = argparse.ArgumentParser(
-        description="Interactive tool to select 4 tatami corners for world frame anchoring."
-    )
-    parser.add_argument(
-        "--images", "-i", nargs="+", required=True,
-        help="List of anchor image paths (e.g. gopro_0.jpg gopro_1.jpg realsense_cam_0.jpg)."
-    )
-    parser.add_argument(
-        "--output_json", "-o", type=str, default="mat_corners.json",
-        help="Output path for annotated corner coordinates."
-    )
-    parser.add_argument(
-        "--mat_size", "-s", type=float, default=8.0,
-        help="Physical length of combat area edge in meters (default: 8.0m)."
-    )
-    return parser.parse_args()
+# List all anchor images (one clean frame per camera showing the full tatami)
+ANCHOR_IMAGES = [
+    "anchor_realsense_cam_0.jpg",
+    "anchor_realsense_cam_1.jpg",
+    "anchor_gopro_0.jpg",
+    "anchor_gopro_1.jpg",
+]
 
+# Physical square dimension of the inner combat tatami area (in meters)
+MAT_SIZE_METERS = 8.0
 
-# Global state for OpenCV mouse callback
+# Destination path for the saved corner annotations
+OUTPUT_JSON = "mat_corners.json"
+
+# ─────────────────────────────────────────────
+#  GLOBAL STATE FOR MOUSE CALLBACK
+# ─────────────────────────────────────────────
+
 clicked_points = []
 current_display_img = None
 
@@ -70,12 +67,18 @@ def mouse_callback(event, x, y, flags, param):
 
 def annotate_camera(image_path):
     """
-    Loads one image and prompts the user to click the 4 tatami corners.
+    Loads one image and prompts the operator to click the 4 tatami corners.
+    
+    Arguments:
+        image_path (str): Path to image file.
+
+    Returns:
+        list: 4-element list of [x, y] coordinates.
     """
     global clicked_points, current_display_img
     img = cv2.imread(image_path)
     if img is None:
-        raise FileNotFoundError(f"[-] Could not load: {image_path}")
+        raise FileNotFoundError(f"[-] Could not load image: {image_path}")
 
     window_name = "Tatami Annotation"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -87,13 +90,14 @@ def annotate_camera(image_path):
         cv2.setMouseCallback(window_name, mouse_callback, img)
 
         print(f"\n[+] Annotating: {image_path}")
-        print("    Click order: 1. Top-Left, 2. Top-Right, 3. Bottom-Right, 4. Bottom-Left")
+        print("    Click order: 1. Top-Left  2. Top-Right  3. Bottom-Right  4. Bottom-Left")
         print("    Keys: [ENTER/SPACE] Accept | [r] Reset | [q] Cancel")
 
         key = cv2.waitKey(0) & 0xFF
         if key in (13, 32) and len(clicked_points) == 4:  # Enter or Space
             break
         elif key == ord('r'):
+            print("    [Reset] Clearing clicked points for this frame.")
             continue
         elif key == ord('q'):
             cv2.destroyAllWindows()
@@ -104,12 +108,11 @@ def annotate_camera(image_path):
 
 
 def main():
-    args = parse_arguments()
-    half = args.mat_size / 2.0
+    half = MAT_SIZE_METERS / 2.0
 
     annotations = {
         "metadata": {
-            "mat_size_meters": args.mat_size,
+            "mat_size_meters": MAT_SIZE_METERS,
             "world_points": {
                 "top_left": [-half, half, 0.0],
                 "top_right": [half, half, 0.0],
@@ -120,8 +123,21 @@ def main():
         "cameras": {}
     }
 
-    for img_path in args.images:
-        cam_id = os.path.splitext(os.path.basename(img_path))[0]
+    print("=" * 60)
+    print("  FIELD TATAMI CORNER ANNOTATION TOOL")
+    print(f"  Target Mat Size: {MAT_SIZE_METERS:.1f}m x {MAT_SIZE_METERS:.1f}m")
+    print(f"  Total Cameras  : {len(ANCHOR_IMAGES)}")
+    print("=" * 60)
+
+    for img_path in ANCHOR_IMAGES:
+        if not os.path.exists(img_path):
+            print(f"[-] Warning: File not found ({img_path}). Skipping.")
+            continue
+
+        # Derives camera ID from the filename (e.g. 'anchor_gopro_0.jpg' -> 'gopro_0')
+        raw_name = os.path.splitext(os.path.basename(img_path))[0]
+        cam_id = raw_name.replace("anchor_", "")
+
         pts = annotate_camera(img_path)
         annotations["cameras"][cam_id] = {
             "image_path": img_path,
@@ -133,11 +149,16 @@ def main():
             }
         }
 
-    os.makedirs(os.path.dirname(os.path.abspath(args.output_json)), exist_ok=True)
-    with open(args.output_json, 'w') as f:
+    out_dir = os.path.dirname(os.path.abspath(OUTPUT_JSON))
+    os.makedirs(out_dir, exist_ok=True)
+
+    with open(OUTPUT_JSON, 'w') as f:
         json.dump(annotations, f, indent=4)
 
-    print(f"\n[+] Mat annotations saved successfully to: {args.output_json}")
+    print("\n" + "=" * 60)
+    print(f" SUCCESS: Annotations written to {OUTPUT_JSON}")
+    print(f" Cameras saved: {list(annotations['cameras'].keys())}")
+    print("=" * 60 + "\n")
 
 
 if __name__ == "__main__":
