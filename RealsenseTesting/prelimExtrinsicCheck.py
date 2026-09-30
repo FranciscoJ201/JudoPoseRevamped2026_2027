@@ -5,13 +5,23 @@ import open3d as o3d
 import pyrealsense2 as rs
 
 # --- CONFIGURATION ---
-CHECKBOARD_SIZE = (
-    9,
-    6,
-)  # Internal corners of your checkerboard (columns - 1, rows - 1)
-SQUARE_SIZE = 0.025  # Size of a square in meters (e.g., 25mm)
-LEFT_IMAGES_PATH = "left_cam/*.png"
-RIGHT_IMAGES_PATH = "right_cam/*.png"
+LEFT_IMAGES_PATH = "calib_capture/left_cam/*.jpg"
+RIGHT_IMAGES_PATH = "calib_capture/right_cam/*.jpg"
+
+# Setup ChArUco Board Parameters (4x4 dictionary, e.g., 5x7 squares layout)
+# Adjust squaresX and squaresY to match your physical board dimensions
+ARUCO_DICT = cv2.aruco.DICT_4X4_50
+squaresX = 5
+squaresY = 7
+squareLength = 0.04  # Size of checker square in meters (e.g., 40mm)
+markerLength = 0.03  # Size of ArUco marker in meters (e.g., 30mm)
+
+# Initialize ArUco dictionary and ChArUco board
+aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICT)
+board = cv2.aruco.CharucoBoard(
+    (squaresX, squaresY), squareLength, markerLength, aruco_dict
+)
+detector = cv2.aruco.CharucoDetector(board)
 
 # 1. Pull Intrinsics directly from RealSense Pipeline (Offline device read)
 print("Pulling factory intrinsics from RealSense device...")
@@ -32,19 +42,9 @@ K = np.array(
     ],
     dtype=np.float32,
 )
-
-dist_coeffs = np.array(
-    intrinsics.coeffs, dtype=np.float32
-)  # Distortion parameters
+dist_coeffs = np.array(intrinsics.coeffs, dtype=np.float32)
 pipeline.stop()
 print("Successfully retrieved camera intrinsics!")
-
-# 2. Prepare Object Points (3D coordinates of board grid)
-objp = np.zeros((CHECKBOARD_SIZE[0] * CHECKBOARD_SIZE[1], 3), np.float32)
-objp[:, :2] = np.mgrid[
-    0 : CHECKBOARD_SIZE[0], 0 : CHECKBOARD_SIZE[1]
-].T.reshape(-1, 2)
-objp *= SQUARE_SIZE
 
 objpoints = []  # 3D points in real world space
 imgpoints_left = []  # 2D points in left camera view
@@ -67,30 +67,46 @@ for img_l_path, img_r_path in zip(left_images, right_images):
   gray_l = cv2.cvtColor(img_l, cv2.COLOR_BGR2GRAY)
   gray_r = cv2.cvtColor(img_r, cv2.COLOR_BGR2GRAY)
 
-  ret_l, corners_l = cv2.findChessboardCorners(gray_l, CHECKBOARD_SIZE, None)
-  ret_r, corners_r = cv2.findChessboardCorners(gray_r, CHECKBOARD_SIZE, None)
+  # Detect ChArUco corners for both images
+  charuco_corners_l, charuco_ids_l, _, _ = detector.detectBoard(gray_l)
+  charuco_corners_r, charuco_ids_r, _, _ = detector.detectBoard(gray_r)
 
-  if ret_l and ret_r:
-    objpoints.append(objp)
-    # Refine corner locations for sub-pixel accuracy
-    cv2.cornerSubPix(gray_l, corners_l, (11, 11), (-1, -1), criteria)
-    cv2.cornerSubPix(gray_r, corners_r, (11, 11), (-1, -1), criteria)
+  # Check if both cameras successfully detected enough corners
+  if (
+      charuco_corners_l is not None
+      and charuco_corners_r is not None
+      and len(charuco_corners_l) > 4
+      and len(charuco_corners_r) > 4
+  ):
 
-    imgpoints_left.append(corners_l)
-    imgpoints_right.append(corners_r)
+    # Match common corners found in both views
+    # For robust stereo calibration, we match based on IDs
+    common_ids, idx_l, idx_r = np.intersect1d(
+        charuco_ids_l, charuco_ids_r, return_indices=True
+    )
 
-    # Save image shape safely inside the loop
-    image_shape = gray_l.shape[::-1]
+    if len(common_ids) > 4:
+      matched_corners_l = charuco_corners_l[idx_l]
+      matched_corners_r = charuco_corners_r[idx_r]
+
+      # Get corresponding 3D object points from the board layout model
+      objp = board.getChessboardCorners()[common_ids].reshape(-1, 3)
+
+      objpoints.append(objp)
+      imgpoints_left.append(matched_corners_l)
+      imgpoints_right.append(matched_corners_r)
+
+      image_shape = gray_l.shape[::-1]
 
 if len(objpoints) == 0:
   raise ValueError(
-      "No valid chessboard corners found in any image pair! Check your image"
-      " paths and board size."
+      "No valid ChArUco corners found in any image pair! Check your board"
+      " dimensions (squaresX/squaresY)."
   )
 
 print("Running Stereo Calibration between the two RealSense cameras...")
-# 3. Stereo Calibration to find Relative Extrinsics (R, T) between Cam 1 and Cam 2
-flags = cv2.CALIB_FIX_INTRINSIC  # Keep factory intrinsics fixed, solve only R, T
+# 2. Stereo Calibration using ChArUco matched points
+flags = cv2.CALIB_FIX_INTRINSIC
 ret, _, _, _, _, R, T, _, _ = cv2.stereoCalibrate(
     objpoints,
     imgpoints_left,
@@ -108,34 +124,28 @@ print(f"Stereo Calibration Complete! RMS Error: {ret:.4f}")
 print(f"Rotation Matrix R:\n{R}")
 print(f"Translation Vector T (meters):\n{T}")
 
-# 4. Build Projection Matrices for 3D Triangulation Test
-# Camera 1 at origin
+# 3. Build Projection Matrices for 3D Triangulation Test
 P1 = K @ np.hstack((np.eye(3), np.zeros((3, 1))))
-# Camera 2 transformed by stereo R and T
 P2 = K @ np.hstack((R, T))
 
-# Take the first detected board corner from both images to test triangulation
+# Take the first matched ChArUco corner to test triangulation
 pt1 = imgpoints_left[0][0][0]
 pt2 = imgpoints_right[0][0][0]
 
-# Triangulate 3D point using OpenCV
 pt4d = cv2.triangulatePoints(P1, P2, pt1.reshape(2, 1), pt2.reshape(2, 1))
 point_3d = (pt4d[:3] / pt4d[3]).ravel()
-print(f"Test Triangulated 3D Point (Board Corner): {point_3d} meters")
+print(f"Test Triangulated 3D Point (ChArUco Corner): {point_3d} meters")
 
-# 5. Visualize in 3D Space via Open3D
+# 4. Visualize in 3D Space via Open3D
 vis = o3d.visualization.Visualizer()
-vis.create_window(window_name="Offline Stereo Rig 3D Test", width=800, height=600)
+vis.create_window(
+    window_name="Offline ChArUco Stereo Rig 3D Test", width=800, height=600
+)
 
-# Create Coordinate frames representing both cameras
 cam1_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.2)
 cam2_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.2)
-# Apply transformation to Camera 2 frame based on stereo calibration output
-cam2_frame.transform(
-    np.vstack((np.hstack((R, T)), [0, 0, 0, 1]))
-)  # Homogeneous matrix
+cam2_frame.transform(np.vstack((np.hstack((R, T)), [0, 0, 0, 1])))
 
-# Create a sphere at the triangulated corner point
 point_sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.015)
 point_sphere.paint_uniform_color([0.0, 1.0, 0.0])
 point_sphere.translate(point_3d)
