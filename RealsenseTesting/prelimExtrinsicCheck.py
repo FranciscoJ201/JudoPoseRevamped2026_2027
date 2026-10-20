@@ -5,8 +5,8 @@ import open3d as o3d
 import pyrealsense2 as rs
 
 # --- CONFIGURATION (Synced with your ChArUco dimensions) ---
-LEFT_IMAGES_PATH = "left_cam/*.png"
-RIGHT_IMAGES_PATH = "right_cam/*.png"
+LEFT_IMAGES_PATH = "calib_capture/left_cam/*.jpg"
+RIGHT_IMAGES_PATH = "calib_capture/right_cam/*.jpg"
 
 # ChArUco board layout matching your reference code
 ARUCO_DICT = cv2.aruco.DICT_4X4_50

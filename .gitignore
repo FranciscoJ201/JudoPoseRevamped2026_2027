@@ -17,3 +17,5 @@ XMem
 smpl_meshes_output
 **/*.xml
 CLAUDE.md
+currentProgress.md
+PhysPose_Detailed_Notes.md

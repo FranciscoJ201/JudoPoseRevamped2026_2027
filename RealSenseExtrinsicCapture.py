@@ -51,11 +51,12 @@ POSITION_KEYS = {
 }
 
 # Overlay colours
-COLOR_ACTIVE   = (0,   220,  0)    # green  — current position label
+COLOR_ACTIVE   = (0,   220,   0)    # green  — current position label
 COLOR_INACTIVE = (160, 160, 160)   # grey   — other positions in HUD
 COLOR_CAPTURE  = (0,   200, 255)   # yellow — flash on capture
 COLOR_ANCHOR   = (255, 120,   0)   # orange — anchor shot indicator
 COLOR_COUNT    = (255, 255, 255)   # white  — shot counter
+COLOR_TIMER    = (0,   140, 255)   # orange/amber — timer countdown & mode indicator
 
 
 # ─────────────────────────────────────────────
@@ -187,23 +188,26 @@ def save_intrinsics(profile, cam_label, serial, cam_root):
 # ─────────────────────────────────────────────
 
 def draw_hud(img, cam_label, current_pos_idx, shot_counts, flash_alpha,
-             anchor_count, flash_is_anchor=False):
+             anchor_count, flash_is_anchor=False, timer_mode=False, countdown_val=None):
     """
-    Draws the position menu and shot counter onto the preview image in-place.
+    Draws the position menu, shot counter, mode status, and countdown onto preview.
 
-    Layout (top-left corner):
-        [cam label]
-        1: top_left      (N shots)
-        2: top_right     (N shots)
-        ...
-        A: anchor        (N shots)
-        SPACE to capture | Q to quit
+    Arguments:
+        img (np.ndarray): Image buffer to annotate in-place.
+        cam_label (str): Current camera identifier.
+        current_pos_idx (int): Index into POSITIONS list.
+        shot_counts (dict): Shot tally mapping per camera and position.
+        flash_alpha (float): Intensity value for capture confirmation tint.
+        anchor_count (int): Recorded shots for anchor calibration.
+        flash_is_anchor (bool): Toggle for color selection on capture flash.
+        timer_mode (bool): Whether 5-second countdown delay is armed.
+        countdown_val (float or None): Remaining seconds in countdown.
     """
     overlay = img.copy()
 
     # Dark background panel for readability
     panel_w = 320
-    panel_h = 30 + len(POSITIONS) * 26 + 60
+    panel_h = 30 + len(POSITIONS) * 26 + 85
     cv2.rectangle(overlay, (0, 0), (panel_w, panel_h), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.55, img, 0.45, 0, img)
 
@@ -228,8 +232,29 @@ def draw_hud(img, cam_label, current_pos_idx, shot_counts, flash_alpha,
                 (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, anchor_color, 1, cv2.LINE_AA)
     y += 26
 
+    # Mode indicator
+    mode_text = "MODE: TIMER (5s)" if timer_mode else "MODE: INSTANT"
+    mode_col = COLOR_TIMER if timer_mode else COLOR_ACTIVE
+    cv2.putText(img, f'  T: {mode_text}', (8, y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.46, mode_col, 1, cv2.LINE_AA)
+    y += 24
+
     cv2.putText(img, 'SPACE: capture  Q: quit', (8, y),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.42, COLOR_INACTIVE, 1, cv2.LINE_AA)
+
+    # Large prominent countdown indicator
+    if countdown_val is not None and countdown_val > 0:
+        cd_int = int(np.ceil(countdown_val))
+        text = str(cd_int)
+        font_scale = 3.0
+        thickness = 4
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+        cx = (img.shape[1] - tw) // 2
+        cy = (img.shape[0] + th) // 2
+        cv2.putText(img, text, (cx + 2, cy + 2), cv2.FONT_HERSHEY_SIMPLEX,
+                    font_scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+        cv2.putText(img, text, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX,
+                    font_scale, COLOR_TIMER, thickness, cv2.LINE_AA)
 
     # Capture flash — brief colour tint on the full frame
     if flash_alpha > 0:
@@ -247,6 +272,14 @@ def capture_frames(pipelines, cam_labels, dirs, current_pos_idx,
     """
     Grabs the latest frame from every pipeline simultaneously and saves them.
     Returns the number of cameras successfully saved.
+
+    Arguments:
+        pipelines (list): List of tuples containing `(cam_label, pipeline_instance)`.
+        cam_labels (list): Strings identifying detected cameras.
+        dirs (dict): Target storage directories for cameras, anchor shots, and positions.
+        current_pos_idx (int): Current board grid position index.
+        shot_counts (dict): In-memory accumulator tracking shot metrics.
+        is_anchor (bool): Flag denoting whether exposure is an un-occluded anchor frame.
     """
     saved = 0
     timestamp = int(time.time() * 1000)
@@ -303,7 +336,7 @@ def main():
     dirs        = make_output_dirs(cam_labels)
     shot_counts = count_existing_shots(dirs)
     anchor_counts = {label: len([f for f in os.listdir(dirs[label]['anchor'])
-                                  if f.lower().endswith(('.jpg', '.png'))])
+                                 if f.lower().endswith(('.jpg', '.png'))])
                      for label in cam_labels}
 
     print(f"\nOutput root : {os.path.abspath(OUTPUT_ROOT)}")
@@ -328,6 +361,7 @@ def main():
     print(f"{'='*55}")
     print(f"  1-5  : select board position")
     print(f"  A    : take anchor shot (clean mat, no board)")
+    print(f"  T    : toggle mode (Instant vs 5s Timer)")
     print(f"  SPACE: capture from all {len(pipelines)} camera(s) simultaneously")
     print(f"  Q    : quit and save")
     print(f"{'='*55}\n")
@@ -337,6 +371,11 @@ def main():
     flash_alpha      = 0.0       # decays each frame to create the capture flash
     flash_is_anchor  = False
     last_capture_msg = ''
+    timer_mode       = False
+    countdown_active = False
+    countdown_start  = 0.0
+    countdown_sec    = 5.0
+    countdown_is_anchor = False
 
     try:
         while True:
@@ -353,32 +392,70 @@ def main():
                 except Exception:
                     img = np.zeros((H, W, 3), dtype=np.uint8)
 
+                # Compute countdown remaining if active
+                cd_rem = None
+                if countdown_active:
+                    cd_rem = max(0.0, countdown_sec - (time.time() - countdown_start))
+
                 # Draw HUD onto each camera's preview
                 anchor_count = anchor_counts.get(label, 0)
                 draw_hud(img, label, current_pos_idx, shot_counts,
-                         flash_alpha, anchor_count, flash_is_anchor)
+                         flash_alpha, anchor_count, flash_is_anchor,
+                         timer_mode=timer_mode, countdown_val=cd_rem)
                 preview_frames.append(img)
 
             # ── Composite all cameras side by side ───────────────────────────
             composite = np.hstack(preview_frames)
 
             # Status bar at the bottom of the composite
-            status_h  = 36
+            status_h   = 36
             status_bar = np.zeros((status_h, composite.shape[1], 3), dtype=np.uint8)
             pos_name   = POSITIONS[current_pos_idx]
             total_shots = sum(sum(shot_counts[l].values()) for l in cam_labels)
-            status_text = (f"Position: {pos_name}  |  "
+            mode_desc  = "Timer (5s)" if timer_mode else "Instant"
+            status_text = (f"Mode: {mode_desc}  |  "
+                           f"Position: {pos_name}  |  "
                            f"Total shots: {total_shots}  |  "
                            f"{last_capture_msg}")
             cv2.putText(status_bar, status_text, (10, 24),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.52, COLOR_COUNT, 1, cv2.LINE_AA)
             composite = np.vstack([composite, status_bar])
 
-            cv2.imshow("Extrinsic Capture — SPACE: capture  1-5: position  A: anchor  Q: quit",
-                       composite)
+            cv2.imshow("Extrinsic Capture — SPACE: capture  1-5: position  A: anchor  T: mode  Q: quit",
+                        composite)
 
             # Decay flash
             flash_alpha = max(0.0, flash_alpha - 0.08)
+
+            # ── Check active countdown completion ────────────────────────────
+            if countdown_active:
+                elapsed = time.time() - countdown_start
+                if elapsed >= countdown_sec:
+                    countdown_active = False
+                    if countdown_is_anchor:
+                        saved = capture_frames(pipelines, cam_labels, dirs,
+                                               current_pos_idx, shot_counts,
+                                               is_anchor=True)
+                        for label in cam_labels:
+                            anchor_counts[label] = anchor_counts.get(label, 0) + (1 if saved else 0)
+                        flash_alpha     = 0.45
+                        flash_is_anchor = True
+                        last_capture_msg = f"Anchor saved ({saved}/{len(pipelines)} cameras)"
+                        print(f"  Anchor captured — {saved}/{len(pipelines)} cameras saved.")
+                    else:
+                        saved = capture_frames(pipelines, cam_labels, dirs,
+                                               current_pos_idx, shot_counts,
+                                               is_anchor=False)
+                        pos_name = POSITIONS[current_pos_idx]
+                        total_at_pos = shot_counts[cam_labels[0]].get(pos_name, 0)
+                        flash_alpha     = 0.45
+                        flash_is_anchor = False
+                        last_capture_msg = (f"Saved {pos_name} "
+                                            f"({total_at_pos} shots here, "
+                                            f"{saved}/{len(pipelines)} cams)")
+                        print(f"  Captured [{pos_name}] — "
+                              f"{total_at_pos} shots at this position, "
+                              f"{saved}/{len(pipelines)} cameras saved.")
 
             # ── Key handling ─────────────────────────────────────────────────
             key = cv2.waitKey(1) & 0xFF
@@ -391,33 +468,56 @@ def main():
                 last_capture_msg = f"Selected: {POSITIONS[current_pos_idx]}"
                 print(f"  Position → {POSITIONS[current_pos_idx]}")
 
+            elif key == ord('t'):
+                timer_mode = not timer_mode
+                mode_str = "Timer Mode (5s delay)" if timer_mode else "Instant Mode"
+                last_capture_msg = f"Switched to {mode_str}"
+                print(f"  Mode toggled → {mode_str}")
+                if not timer_mode:
+                    countdown_active = False
+
             elif key == ord('a'):
                 # Anchor shot — clean mat, no board
-                saved = capture_frames(pipelines, cam_labels, dirs,
-                                       current_pos_idx, shot_counts,
-                                       is_anchor=True)
-                for label in cam_labels:
-                    anchor_counts[label] = anchor_counts.get(label, 0) + (1 if saved else 0)
-                flash_alpha     = 0.45
-                flash_is_anchor = True
-                last_capture_msg = f"Anchor saved ({saved}/{len(pipelines)} cameras)"
-                print(f"  Anchor captured — {saved}/{len(pipelines)} cameras saved.")
+                if timer_mode:
+                    countdown_active = True
+                    countdown_start = time.time()
+                    countdown_is_anchor = True
+                    last_capture_msg = "Anchor countdown started (5s)..."
+                    print("  Timer started for anchor shot (5 seconds)...")
+                else:
+                    saved = capture_frames(pipelines, cam_labels, dirs,
+                                           current_pos_idx, shot_counts,
+                                           is_anchor=True)
+                    for label in cam_labels:
+                        anchor_counts[label] = anchor_counts.get(label, 0) + (1 if saved else 0)
+                    flash_alpha     = 0.45
+                    flash_is_anchor = True
+                    last_capture_msg = f"Anchor saved ({saved}/{len(pipelines)} cameras)"
+                    print(f"  Anchor captured — {saved}/{len(pipelines)} cameras saved.")
 
             elif key == ord(' '):
                 # Board shot at current position
-                saved = capture_frames(pipelines, cam_labels, dirs,
-                                       current_pos_idx, shot_counts,
-                                       is_anchor=False)
-                pos_name = POSITIONS[current_pos_idx]
-                total_at_pos = shot_counts[cam_labels[0]].get(pos_name, 0)
-                flash_alpha     = 0.45
-                flash_is_anchor = False
-                last_capture_msg = (f"Saved {pos_name} "
-                                    f"({total_at_pos} shots here, "
-                                    f"{saved}/{len(pipelines)} cams)")
-                print(f"  Captured [{pos_name}] — "
-                      f"{total_at_pos} shots at this position, "
-                      f"{saved}/{len(pipelines)} cameras saved.")
+                if timer_mode:
+                    countdown_active = True
+                    countdown_start = time.time()
+                    countdown_is_anchor = False
+                    pos_name = POSITIONS[current_pos_idx]
+                    last_capture_msg = f"Countdown started for [{pos_name}] (5s)..."
+                    print(f"  Timer started for [{pos_name}] (5 seconds)...")
+                else:
+                    saved = capture_frames(pipelines, cam_labels, dirs,
+                                           current_pos_idx, shot_counts,
+                                           is_anchor=False)
+                    pos_name = POSITIONS[current_pos_idx]
+                    total_at_pos = shot_counts[cam_labels[0]].get(pos_name, 0)
+                    flash_alpha     = 0.45
+                    flash_is_anchor = False
+                    last_capture_msg = (f"Saved {pos_name} "
+                                        f"({total_at_pos} shots here, "
+                                        f"{saved}/{len(pipelines)} cams)")
+                    print(f"  Captured [{pos_name}] — "
+                          f"{total_at_pos} shots at this position, "
+                          f"{saved}/{len(pipelines)} cameras saved.")
 
     finally:
         cv2.destroyAllWindows()
