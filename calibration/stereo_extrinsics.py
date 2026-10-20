@@ -6,6 +6,11 @@ import sys
 import cv2
 import numpy as np
 
+# Make the repo root importable so `common` resolves when run as a script
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from common.charuco import build_charuco_detector
+from common.intrinsics_io import load_intrinsics, resolve_intrinsics_path
+
 
 def parse_arguments():
     """
@@ -90,75 +95,6 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def load_intrinsics(json_path):
-    """
-    Ingests intrinsic parameters supporting both RealSense and GoPro output formats.
-    
-    Arguments:
-        json_path (str): Path to intrinsic parameters JSON.
-
-    Returns:
-        tuple: (K, D, model, width, height)
-    """
-    with open(json_path, 'r') as f:
-        data = json.load(f)
-
-    model = data.get("camera_model", data.get("distortion_model", "standard")).lower()
-    width = int(data["width"])
-    height = int(data["height"])
-
-    if "camera_matrix" in data:
-        K = np.array(data["camera_matrix"], dtype=np.float64)
-        D = np.array(data["distortion_coefficients"], dtype=np.float64).reshape(-1, 1)
-    else:
-        fx, fy = data["fx"], data["fy"]
-        cx, cy = data["cx"], data["cy"]
-        K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float64)
-        D = np.array(data["distortion_coeffs"], dtype=np.float64).reshape(-1, 1)
-
-    return K, D, model, width, height
-
-
-def resolve_intrinsics_path(explicit_path, cam_dir):
-    """
-    Resolves intrinsics JSON path from explicit CLI argument or default directory location.
-
-    Arguments:
-        explicit_path (str): Value passed via CLI.
-        cam_dir (str): Camera root directory.
-
-    Returns:
-        str: Validated path to intrinsics JSON.
-    """
-    if explicit_path and os.path.isfile(explicit_path):
-        return explicit_path
-
-    if cam_dir:
-        candidate = os.path.join(cam_dir, "intrinsics.json")
-        if os.path.isfile(candidate):
-            return candidate
-        candidate_parent = os.path.join(os.path.dirname(cam_dir), "intrinsics.json")
-        if os.path.isfile(candidate_parent):
-            return candidate_parent
-
-    raise FileNotFoundError(f"[-] Could not locate intrinsics JSON for '{explicit_path or cam_dir}'.")
-
-
-def get_aruco_dictionary(dict_name):
-    """
-    Retrieves the cv2.aruco predefined dictionary object matching the given name.
-
-    Arguments:
-        dict_name (str): Name string of the dictionary (e.g. 'DICT_5X5_50').
-
-    Returns:
-        cv2.aruco.Dictionary: Instantiated dictionary.
-    """
-    if not hasattr(cv2.aruco, dict_name):
-        raise ValueError(f"[-] Unknown ArUco dictionary: {dict_name}")
-    return cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, dict_name))
-
-
 def find_synchronized_pairs(cam1_dir, cam2_dir):
     """
     Recursively scans two camera directories and matches frames by identical filename.
@@ -215,7 +151,7 @@ def detect_charuco_corners(img_path, detector):
 
 def plot_calibration_verification_3d(obj_points_list, img_points1_list, img_points2_list, 
                                      P1, P2, cam1_pos, cam2_pos, R1, R2, K1, D1, K2, D2, 
-                                     pair_idx=0, pair_fname="", save_path=None):
+                                     t1_world, pair_idx=0, pair_fname="", save_path=None):
     """
     Plots an interactive 3D scene of camera poses and triangulated 3D points
     for a SINGLE simultaneous time period, alongside reprojection error residuals.
@@ -234,6 +170,7 @@ def plot_calibration_verification_3d(obj_points_list, img_points1_list, img_poin
         D1 (np.ndarray): Distortion vector for camera 1.
         K2 (np.ndarray): 3x3 intrinsic matrix for camera 2.
         D2 (np.ndarray): Distortion vector for camera 2.
+        t1_world (np.ndarray): (3, 1) camera 1 translation vector from the anchor-pair PnP solve.
         pair_idx (int): Specific synchronized pair index to visualize.
         pair_fname (str): Filename of the frame pair being visualized.
         save_path (str, optional): Destination file path to save the generated plot.
@@ -284,7 +221,7 @@ def plot_calibration_verification_3d(obj_points_list, img_points1_list, img_poin
     
     # Map board local coordinates into world frame: X_world = R1^T * (R_b * X_board + tvec_b - t1)
     # Since P1 world frame is aligned with Cam 1 at this anchor shot:
-    true_3d_world = (R1.T @ (R_b @ true_3d_local.T + tvec_board - t1_world_global)).T
+    true_3d_world = (R1.T @ (R_b @ true_3d_local.T + tvec_board - t1_world)).T
 
     ax.scatter(true_3d_world[:, 0], true_3d_world[:, 1], true_3d_world[:, 2], 
                color='black', s=30, label=f'True Board Pose (Z=0 plane)')
@@ -348,7 +285,6 @@ def plot_calibration_verification_3d(obj_points_list, img_points1_list, img_poin
 
 
 def main():
-    global t1_world_global
     args = parse_arguments()
 
     # 1. Resolve intrinsics paths
@@ -375,14 +311,9 @@ def main():
         raise FileNotFoundError("[-] No matching image filenames found between camera directories.")
 
     # 4. Initialize board and detector
-    dictionary = get_aruco_dictionary(args.dictionary)
-    board = cv2.aruco.CharucoBoard(
-        (args.squares_x, args.squares_y),
-        args.square_len,
-        args.marker_len,
-        dictionary
+    board, detector = build_charuco_detector(
+        args.squares_x, args.squares_y, args.square_len, args.marker_len, args.dictionary
     )
-    detector = cv2.aruco.CharucoDetector(board)
     all_obj_points = board.getChessboardCorners()
 
     # 5. Extract shared corner correspondences across all valid pairs
@@ -400,17 +331,14 @@ def main():
 
         ids1_flat = ids1.flatten()
         ids2_flat = ids2.flatten()
-        common_ids = np.intersect1d(ids1_flat, ids2_flat)
+        common_ids, idx1, idx2 = np.intersect1d(ids1_flat, ids2_flat, return_indices=True)
 
         if len(common_ids) < args.min_corners:
             continue
 
-        map1 = {cid: corners1[idx][0] for idx, cid in enumerate(ids1_flat)}
-        map2 = {cid: corners2[idx][0] for idx, cid in enumerate(ids2_flat)}
-
-        shared_pts_3d = np.array([all_obj_points[cid] for cid in common_ids], dtype=np.float32)
-        shared_pts_2d_1 = np.array([map1[cid] for cid in common_ids], dtype=np.float32).reshape(-1, 1, 2)
-        shared_pts_2d_2 = np.array([map2[cid] for cid in common_ids], dtype=np.float32).reshape(-1, 1, 2)
+        shared_pts_3d = all_obj_points[common_ids].astype(np.float32)
+        shared_pts_2d_1 = corners1.reshape(-1, 2)[idx1].astype(np.float32).reshape(-1, 1, 2)
+        shared_pts_2d_2 = corners2.reshape(-1, 2)[idx2].astype(np.float32).reshape(-1, 1, 2)
 
         obj_points_list.append(shared_pts_3d)
         img_points1_list.append(shared_pts_2d_1)
@@ -474,7 +402,6 @@ def main():
     )
     R1_world, _ = cv2.Rodrigues(rvec1)
     t1_world = tvec1
-    t1_world_global = t1_world  # Saved for plotting helper
 
     # Camera 2 world pose derived via the stereo transformation
     R2_world = R_rel @ R1_world
@@ -553,6 +480,7 @@ def main():
             D1,
             K2,
             D2,
+            t1_world=t1_world,
             pair_idx=target_pair_idx,
             pair_fname=anchor_record["filename"],
             save_path=args.plot_output

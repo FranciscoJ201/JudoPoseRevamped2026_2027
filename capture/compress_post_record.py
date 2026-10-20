@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 import glob
@@ -68,11 +69,19 @@ def compress_depth_directory(cam_dir, remove_loose=True):
 
 def main():
     """
-    Scans the current working directory (or directory passed as CLI argument)
+    Scans the root directory given by --root (default: current working directory)
     for all 'realsense_cam_*' folders and compresses depth frames.
+
+    CLI arguments:
+        root (str, positional, optional): Directory containing 'realsense_cam_*' folders.
+        --keep_loose (flag): Keep the loose depth .npy files after compression.
     """
-    target_root = sys.argv[1] if len(sys.argv) > 1 else "."
-    
+    parser = argparse.ArgumentParser(description="Compress RealSense depth .npy frames into per-camera ZIP archives.")
+    parser.add_argument("root", nargs="?", default=".", help="Directory containing 'realsense_cam_*' folders.")
+    parser.add_argument("--keep_loose", action="store_true", help="Do not delete loose .npy files after verified compression.")
+    args = parser.parse_args()
+    target_root = args.root
+
     # Locate all realsense camera directories
     cam_dirs = sorted(glob.glob(os.path.join(target_root, "realsense_cam_*")))
 
@@ -89,7 +98,7 @@ def main():
     total_comp = 0.0
 
     for cdir in cam_dirs:
-        _, raw_mb, comp_mb = compress_depth_directory(cdir, remove_loose=True)
+        _, raw_mb, comp_mb = compress_depth_directory(cdir, remove_loose=not args.keep_loose)
         total_raw += raw_mb
         total_comp += comp_mb
 
